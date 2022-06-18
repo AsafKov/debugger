@@ -77,15 +77,15 @@ bool isFuncExistorGlobal (char *file_path, char* funcName, bool* isGlobal)
     Elf64_Shdr* section_header_arr = (Elf64_Shdr*)((char*)elf + elf_header->e_shoff); //getting sectionHeader
     Elf64_Shdr string_section = section_header_arr[elf_header->e_shstrndx]; //getting string section
     char *string_table = (char*)elf + string_section.sh_offset; //getting the string table
-    Elf64_Half numOfSections = elf_header->e_shnum;
-    Elf64_Sym *symtab;
+    int numOfSymbols=0;
     char *strtab;
-    int numOfSymbols=0, count=0;
+    Elf64_Sym *symtab;
+    Elf64_Half numOfSections = elf_header->e_shnum;
     for(int i = 0; i < numOfSections; i++) {
         char* nameOfSection =section_header_arr[i].sh_name + string_table; //getting the beginning of the string table + offset of current section
         if(section_header_arr[i].sh_type == 2 || !strcmp(".symtab", nameOfSection)){
-            symtab = (Elf64_Sym*)((char*)elf + section_header_arr[i].sh_offset);
             numOfSymbols = section_header_arr[i].sh_size / section_header_arr[i].sh_entsize; //size of section : size of each entry
+            symtab = (Elf64_Sym*)((char*)elf + section_header_arr[i].sh_offset);
         }
         else if( section_header_arr[i].sh_type == 3 || !strcmp(".strtab", nameOfSection)){
             if((char*)elf + section_header_arr[i].sh_offset != string_table)
