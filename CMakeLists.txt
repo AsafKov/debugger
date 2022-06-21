@@ -3,4 +3,4 @@ project(debugger)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_executable(debugger main.cpp)
+add_executable(debugger main.c elf64.h)
