@@ -67,9 +67,35 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
     struct user_regs_struct regs;
     waitpid(pid, &wait_status, 0);
 
-    if(is_dynamic){
+    while(is_dynamic && WIFSTOPPED(wait_status)){
+        // Put breaking point at PLT instruction
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        plt_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rip + got_offset, NULL);
+        plt_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
+        plt_breakpoint = (plt_instruction & 0xFFFFFFFFFFFFFF00) | 0xC;
+        ptrace(PTRACE_POKETEXT, pid, (void*)got_offset, (void*)plt_breakpoint);
+
+        // Wait for arriving at PLT breakpoint
+        ptrace(PTRACE_CONT, pid, NULL, NULL);
+        wait(&wait_status);
+
+        // On arriving to PLT instruction
+        ptrace(PTRACE_POKETEXT, pid, (void*)got_offset, (void*)plt_instruction);
+        // Fix instruction override by breakpoint and put breakpoint at rsp
+        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rsp, NULL);
+        return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
+        ptrace(PTRACE_POKETEXT, pid, (void*)return_addr_instruction, (void*)return_break_point);
+        regs.rip--;
+        ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+
+        // Wait for arriving at return-address breakpoint
+        ptrace(PTRACE_CONT, pid, NULL, NULL);
+        wait(&wait_status);
+
+        // GOT is now updated so can extract the function address
+        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
+
+
     }
 
     func_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) func_address, NULL);
@@ -82,9 +108,13 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
     while(WIFSTOPPED(wait_status)) {
         counter++;
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+        // Put breakpoint at the return address
         return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rsp, NULL);
         return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
         ptrace(PTRACE_POKETEXT, pid, (void*)return_addr_instruction, (void*)return_break_point);
+
+        // Fix the instruction at function entrance
         if(regs.rip == func_address + 1){
             ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_instruction);
             regs.rip--;
@@ -93,8 +123,10 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
 
         ptrace(PTRACE_CONT, pid, NULL, NULL);
         wait(&wait_status);
-        /** Print return value **/
+        //TODO: fix instruction at return address
+        //TODO: print result
 
+        // Put another breakpoint at function address
         func_break_point = (func_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
         ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_break_point);
         ptrace(PTRACE_CONT, pid, NULL, NULL);
@@ -127,7 +159,7 @@ bool isExecutable(char *file_path) {
     return elf_header->e_type == 2;
 }
 
-bool getFunctionInfo(char *file_path, char *func_name, bool *isGlobal, bool *is_dynamic, unsigned long* func_address, unsigned long* got_offset) {
+bool getFunctionInfo(char *file_path, char *func_name, bool *isGlobal, bool *is_dynamic, unsigned long *func_address, unsigned long *got_offset) {
     int fd;
     bool is_executable = false;
     unsigned long symbol_entries = 0, realoc_entries = 0;
@@ -144,7 +176,7 @@ bool getFunctionInfo(char *file_path, char *func_name, bool *isGlobal, bool *is_
 
     elf = mmap(NULL, lseek(fd, 0, SEEK_END), PROT_READ, MAP_PRIVATE, fd, 0);
     elf_header = (Elf64_Ehdr *) elf;
-    section_header_arr = (Elf64_Shdr *) ((char *) elf + elf_header->e_shoff); //getting sectionHeader
+    section_header_arr = (Elf64_Shdr *) ((char *) elf + elf_header->e_shoff); //getting section header
     string_section = section_header_arr[elf_header->e_shstrndx]; //getting string section
     string_table = (char *) elf + string_section.sh_offset; //getting the string table
     Elf64_Half numOfSections = elf_header->e_shnum;
@@ -156,29 +188,34 @@ bool getFunctionInfo(char *file_path, char *func_name, bool *isGlobal, bool *is_
                               section_header_arr[i].sh_entsize; //size of section : size of each entry
             sym_tab = (Elf64_Sym *) ((char *) elf + section_header_arr[i].sh_offset);
         }
+
+        if (section_header_arr[i].sh_type == 11 && strcmp(section_name, ".dynsym") == 0) {
+            dynamic_symbols = (Elf64_Sym *) ((char *) elf + section_header_arr[i].sh_offset);
+        }
+
+        if (section_header_arr[i].sh_type == 4 && strcmp(section_name, ".rela.plt") == 0) {
+            realoc_entries = section_header_arr[i].sh_size /
+                             section_header_arr[i].sh_entsize; //size of section : size of each entry
+            realoc_table = (Elf64_Sym *) ((char *) elf + section_header_arr[i].sh_offset);
+        }
+
         if (section_header_arr[i].sh_type == 3 && strcmp(section_name, ".strtab") == 0) {
             if ((char *) elf + section_header_arr[i].sh_offset != string_table)
                 str_tab = ((char *) elf + section_header_arr[i].sh_offset); //getting the string table of the symbol table
         }
+
         if (section_header_arr[i].sh_type == 3 && strcmp(section_name, ".dynstr") == 0) {
             if ((char *) elf + section_header_arr[i].sh_offset != string_table)
                 dyn_str = ((char *) elf + section_header_arr[i].sh_offset); //getting the string table of the symbol table
         }
-        if (section_header_arr[i].sh_type == 4 && strcmp(section_name, ".rela.plt") == 0) {
-            realoc_entries = section_header_arr[i].sh_size /
-                                      section_header_arr[i].sh_entsize; //size of section : size of each entry
-            realoc_table = (Elf64_Sym *) ((char *) elf + section_header_arr[i].sh_offset);
-        }
-        if (section_header_arr[i].sh_type == 11 && strcmp(section_name, ".dynsym") == 0) {
-            dynamic_symbols = (Elf64_Sym *) ((char *) elf + section_header_arr[i].sh_offset);
-        }
     }
 
+    // Search for the function inside the symbol table
     for (int i = 0; i < symbol_entries; i++) {
         curr_name = str_tab + sym_tab[i].st_name; //the current symbol name in the string table of symbol table
         if (!strcmp(curr_name, func_name)) {
             if (ELF64_ST_BIND(sym_tab[i].st_info) == 1) {
-                if(sym_tab[i].st_shndx == 0){
+                if(sym_tab[i].st_shndx == 0){ // st_shndx == 0 -> UND
                     *is_dynamic = true;
                 }
                 *func_address = sym_tab[i].st_value;
@@ -188,12 +225,13 @@ bool getFunctionInfo(char *file_path, char *func_name, bool *isGlobal, bool *is_
         }
     }
 
+    // Search for the GOT offset of the function if needed
     if(is_dynamic){
         for(int i=0; i < realoc_entries; i++){
             int entryIndex = ELF64_R_SYM(realoc_table[i].st_info);
             curr_name = dyn_str + dynamic_symbols[entryIndex].st_name;
             if(strcmp(curr_name, func_name) == 0){
-                *got_offset = dynamic_symbols[i].st_value; // Offset to GOT entry of func
+                *got_offset = realoc_table[i].st_value; // Offset to GOT entry of func
                 break;
             }
         }
