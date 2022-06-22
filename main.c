@@ -18,6 +18,8 @@ bool getFunctionInfo(char *file_path, char *func_name, bool *isGlobal, bool *is_
 
 void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long got_offset);
 
+void print_run(int run_number, int return_value);
+
 static int counter = 0;
 
 int main(int argc, char **argv) {
@@ -61,9 +63,13 @@ int main(int argc, char **argv) {
     }
 }
 
+void print_run(int run_number, int return_value){
+    printf("run #%d returned with %d\n", run_number, return_value);
+}
+
 void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long got_offset){
     unsigned long func_instruction, func_break_point, return_addr_instruction, return_break_point, plt_instruction, plt_breakpoint;
-    int wait_status;
+    int wait_status, value;
     struct user_regs_struct regs;
     waitpid(pid, &wait_status, 0);
 
@@ -79,23 +85,33 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         wait(&wait_status);
 
         // On arriving to PLT instruction
+        counter++;
+        // Fix PLT instruction
         ptrace(PTRACE_POKETEXT, pid, (void*)got_offset, (void*)plt_instruction);
-        // Fix instruction override by breakpoint and put breakpoint at rsp
+        // Put breakpoint at rsp
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
         return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rsp, NULL);
         return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
-        ptrace(PTRACE_POKETEXT, pid, (void*)return_addr_instruction, (void*)return_break_point);
+        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rsp, (void*)return_break_point);
+        // Set rip at PLT instruction again
         regs.rip--;
         ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 
-        // Wait for arriving at return-address breakpoint
+        // Wait for arrival at return-address breakpoint
         ptrace(PTRACE_CONT, pid, NULL, NULL);
         wait(&wait_status);
-
+        // Fix return address instruction
+        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rip, (void*)return_addr_instruction);
+        // Set rip to redo return-address instruction
+        regs.rip--;
+        value = (int) regs.rax; // function return value
+        ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+        // print result
+        print_run(counter, value);
         // GOT is now updated so can extract the function address
-        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
-
-
+        func_address = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
+        is_dynamic = false;
     }
 
     func_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) func_address, NULL);
@@ -112,22 +128,25 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         // Put breakpoint at the return address
         return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rsp, NULL);
         return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
-        ptrace(PTRACE_POKETEXT, pid, (void*)return_addr_instruction, (void*)return_break_point);
+        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rsp, (void*)return_break_point);
 
         // Fix the instruction at function entrance
-        if(regs.rip == func_address + 1){
-            ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_instruction);
-            regs.rip--;
-            ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-        }
-
+        ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_instruction);
+        regs.rip--;
+        ptrace(PTRACE_SETREGS, pid, NULL, &regs);
         ptrace(PTRACE_CONT, pid, NULL, NULL);
+
         wait(&wait_status);
-        //TODO: fix instruction at return address
-        //TODO: print result
+        // Arrival at return address
+        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+        // Fix return-address instruction
+        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rip, (void*)return_addr_instruction);
+        regs.rip--;
+        value = (int) regs.rax;
+        print_run(counter, value);
+        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rsp, (void*)return_break_point);
 
         // Put another breakpoint at function address
-        func_break_point = (func_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
         ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_break_point);
         ptrace(PTRACE_CONT, pid, NULL, NULL);
         wait(&wait_status);
