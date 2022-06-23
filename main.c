@@ -26,16 +26,16 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         //TODO not enough arguments?
     }
-    char *function_name = argv[0];
-    char *file_path = argv[1];
-    char *exe_args = argv[2];
+    char *function_name = argv[1];
+    char *file_path = argv[2];
+    char *exe_args = argv[3];
     unsigned long func_address;
     unsigned long got_offset;
     bool is_global = false;
     bool is_dynamic = false;
 
     if (!isElf(file_path) || !isExecutable(file_path)) {
-        printf("PRF:: %s not an executable!\n", function_name);
+        printf("PRF:: %s not an executable!\n", file_path);
         return 0;
     }
 
@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
     }
 
     if (!is_global) {
-        printf("PRF:: %s is not a global symbol! :(!\n", function_name);
+        printf("PRF:: %s is not a global symbol! :(\n", function_name);
         return 0;
     }
 
@@ -57,28 +57,29 @@ int main(int argc, char **argv) {
         if(ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0){
             // TODO: ptrace error
         }
-        execl(file_path, exe_args, NULL);
+        execv(file_path, argv+2);
     } else {
         debug(pid, func_address, is_dynamic, got_offset);
     }
 }
 
 void print_run(int run_number, int return_value){
-    printf("run #%d returned with %d\n", run_number, return_value);
+    printf("PRF:: run #%d returned with %d\n", run_number, return_value);
 }
 
 void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long got_offset){
     unsigned long func_instruction, func_break_point, return_addr_instruction, return_break_point, plt_instruction, plt_breakpoint;
+    Elf64_Addr return_address, plt_address;
     int wait_status, value;
     struct user_regs_struct regs;
-    waitpid(pid, &wait_status, 0);
+    wait(&wait_status);
 
     while(is_dynamic && WIFSTOPPED(wait_status)){
         // Put breaking point at PLT instruction
-        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        plt_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
-        plt_breakpoint = (plt_instruction & 0xFFFFFFFFFFFFFF00) | 0xC;
-        ptrace(PTRACE_POKETEXT, pid, (void*)got_offset, (void*)plt_breakpoint);
+	plt_address = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
+        plt_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) plt_address, NULL);
+        plt_breakpoint = (plt_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
+        ptrace(PTRACE_POKETEXT, pid, (void*)plt_address, (void *) plt_breakpoint);
 
         // Wait for arriving at PLT breakpoint
         ptrace(PTRACE_CONT, pid, NULL, NULL);
@@ -87,12 +88,13 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         // On arriving to PLT instruction
         counter++;
         // Fix PLT instruction
-        ptrace(PTRACE_POKETEXT, pid, (void*)got_offset, (void*)plt_instruction);
+        ptrace(PTRACE_POKETEXT, pid, (void*)plt_address, (void*)plt_instruction);
         // Put breakpoint at rsp
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rsp, NULL);
+	return_address = ptrace(PTRACE_PEEKTEXT, pid, regs.rsp, NULL);
+        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) return_address, NULL);
         return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
-        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rsp, (void*)return_break_point);
+        ptrace(PTRACE_POKETEXT, pid, (void*)return_address, (void*)return_break_point);
         // Set rip at PLT instruction again
         regs.rip--;
         ptrace(PTRACE_SETREGS, pid, NULL, &regs);
@@ -102,7 +104,7 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         wait(&wait_status);
         // Fix return address instruction
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rip, (void*)return_addr_instruction);
+        ptrace(PTRACE_POKETEXT, pid, (void*)return_address, (void*)return_addr_instruction);
         // Set rip to redo return-address instruction
         regs.rip--;
         value = (int) regs.rax; // function return value
@@ -123,28 +125,28 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
 
     while(WIFSTOPPED(wait_status)) {
         counter++;
-        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-
-        // Put breakpoint at the return address
-        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) regs.rsp, NULL);
-        return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
-        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rsp, (void*)return_break_point);
 
         // Fix the instruction at function entrance
         ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_instruction);
+        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
         regs.rip--;
+        // Put breakpoint at the return address
+	return_address = ptrace(PTRACE_PEEKTEXT, pid, regs.rsp, NULL);
+        return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) return_address, NULL);
+        return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
+        ptrace(PTRACE_POKETEXT, pid, (void*)return_address, (void*)return_break_point);
         ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-        ptrace(PTRACE_CONT, pid, NULL, NULL);
 
+	ptrace(PTRACE_CONT, pid, NULL, NULL);
         wait(&wait_status);
         // Arrival at return address
-        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
         // Fix return-address instruction
-        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rip, (void*)return_addr_instruction);
-        regs.rip--;
+        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
         value = (int) regs.rax;
+        ptrace(PTRACE_POKETEXT, pid, (void*)return_address, (void*)return_addr_instruction);
         print_run(counter, value);
-        ptrace(PTRACE_POKETEXT, pid, (void*)regs.rsp, (void*)return_break_point);
+        regs.rip--;
+        ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 
         // Put another breakpoint at function address
         ptrace(PTRACE_POKETEXT, pid, (void*)func_address, (void*)func_break_point);
@@ -157,10 +159,15 @@ bool isElf(char *file_path) {
     FILE *file = fopen(file_path, "r");
     char *initial_bytes = (char *) malloc(sizeof(char) * 5);
 
-    fread(initial_bytes, 1, 4, file);
+    int read_bytes = fread(initial_bytes, 1, 4, file);
+    if(read_bytes < 4){
+        free(initial_bytes);
+        fclose(file);
+        return false;
+    }
     initial_bytes[4] = '\0';
 
-    bool is_elf = strcmp(initial_bytes, "_ELF") == 0;
+    bool is_elf = strcmp(initial_bytes+1, "ELF") == 0;
     free(initial_bytes);
     fclose(file);
     return is_elf;
