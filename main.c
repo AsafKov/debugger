@@ -68,7 +68,9 @@ void print_run(unsigned long run_number, int return_value) {
 
 void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long got_offset) {
     unsigned long func_instruction, func_break_point, return_addr_instruction, return_break_point, plt_instruction, plt_breakpoint;
-    unsigned long entry_counter = 0, return_counter = 0;
+    unsigned long orig_stack_ptr;
+    unsigned long entry_counter = 0;
+    bool orig_reached = false;
     Elf64_Addr return_address, plt_address;
     int wait_status, value;
     struct user_regs_struct regs;
@@ -91,6 +93,7 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         ptrace(PTRACE_POKETEXT, pid, (void *) plt_address, (void *) plt_instruction);
         // Put breakpoint at rsp
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+        orig_stack_ptr = regs.rsp;
         return_address = ptrace(PTRACE_PEEKTEXT, pid, regs.rsp, NULL);
         return_addr_instruction = ptrace(PTRACE_PEEKTEXT, pid, (void *) return_address, NULL);
         return_break_point = (return_addr_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
@@ -99,21 +102,25 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         regs.rip--;
         ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 
-        // Wait for arrival at return-address breakpoint
-        ptrace(PTRACE_CONT, pid, NULL, NULL);
-        wait(&wait_status);
-        return_counter++;
-        // Fix return address instruction
-        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_addr_instruction);
-        // Set rip to redo return-address instruction
-        regs.rip--;
-        value = (int) regs.rax; // function return value
-        ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-        // print result
-        if (entry_counter == return_counter) {
-            print_run(entry_counter, value);
+        while(!orig_reached){
+            // Wait for arrival at return-address breakpoint
+            ptrace(PTRACE_CONT, pid, NULL, NULL);
+            wait(&wait_status);
+            // Fix return address instruction
+            ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+            ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_addr_instruction);
+            regs.rip--;
+            value = (int) regs.rax; // function return value
+            ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+            if(regs.rsp >= orig_stack_ptr){
+                orig_reached = true;
+                print_run(entry_counter, value);
+            } else {
+                ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+                ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_break_point);
+            }
         }
+
         // GOT is now updated so can extract the function address
         func_address = ptrace(PTRACE_PEEKTEXT, pid, (void *) got_offset, NULL);
         is_dynamic = false;
@@ -127,10 +134,12 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
     wait(&wait_status);
 
     while (WIFSTOPPED(wait_status)) {
+        orig_reached = false;
         entry_counter++;
         // Fix the instruction at function entrance
         ptrace(PTRACE_POKETEXT, pid, (void *) func_address, (void *) func_instruction);
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+        orig_stack_ptr = regs.rsp;
         regs.rip--;
         // Put breakpoint at the return address
         return_address = ptrace(PTRACE_PEEKTEXT, pid, regs.rsp, NULL);
@@ -139,19 +148,24 @@ void debug(int pid, unsigned long func_address, bool is_dynamic, unsigned long g
         ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_break_point);
         ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 
-        ptrace(PTRACE_CONT, pid, NULL, NULL);
-        wait(&wait_status);
-        // Arrival at return address
-        return_counter++;
-        // Fix return-address instruction
-        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        value = (int) regs.rax;
-        ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_addr_instruction);
-        if (entry_counter == return_counter) {
-            print_run(entry_counter, value);
+        while(!orig_reached){
+            ptrace(PTRACE_CONT, pid, NULL, NULL);
+            wait(&wait_status);
+            // Arrival at return address
+            // Fix return-address instruction
+            ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_addr_instruction);
+            ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+            value = (int) regs.rax;
+            regs.rip--;
+            ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+            if(regs.rsp >= orig_reached){
+                orig_reached = true;
+                print_run(entry_counter, value);
+            } else {
+                ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+                ptrace(PTRACE_POKETEXT, pid, (void *) return_address, (void *) return_break_point);
+            }
         }
-        regs.rip--;
-        ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 
         // Put another breakpoint at function address
         ptrace(PTRACE_POKETEXT, pid, (void *) func_address, (void *) func_break_point);
