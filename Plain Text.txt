@@ -1,0 +1,1 @@
+gcc -no-pie -std=c99 -w -o out ./test_src_files/test1_mult.c ./test_src_files/library.c -Wl,-zlazy ./prf foo out 12345 12345 12345 12345 > ./results/res_static_$i
