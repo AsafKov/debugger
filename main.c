@@ -27,7 +27,6 @@ int main(int argc, char **argv) {
     }
     char *function_name = argv[1];
     char *file_path = argv[2];
-    char *exe_args = argv[3];
     unsigned long func_address;
     unsigned long got_offset;
     bool is_global = false;
